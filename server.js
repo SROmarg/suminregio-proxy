@@ -1,41 +1,71 @@
-const express = require('express');
-const app = express();
+const http = require('http');
+const https = require('https');
 
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
-  res.header('Connection', 'keep-alive');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+const server = http.createServer((req, res) => {
+  // CORS headers en todas las respuestas
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
 
-app.use(express.json({ limit: '20mb' }));
-
-app.post('/api/scan', async (req, res) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey || !apiKey.startsWith('sk-ant')) {
-    return res.status(401).json({ error: 'API key requerida' });
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
   }
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify(req.body)
+
+  if (req.method === 'GET' && req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Proxy OK');
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/scan') {
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey || !apiKey.startsWith('sk-ant')) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'API key requerida' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      const options = {
+        hostname: 'api.anthropic.com',
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Length': Buffer.byteLength(body)
+        }
+      };
+
+      const proxyReq = https.request(options, proxyRes => {
+        let data = '';
+        proxyRes.on('data', chunk => data += chunk);
+        proxyRes.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(data);
+        });
+      });
+
+      proxyReq.on('error', e => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      });
+
+      proxyReq.write(body);
+      proxyReq.end();
     });
-    const data = await response.json();
-    return res.json(data);
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
+    return;
   }
+
+  res.writeHead(404);
+  res.end('Not found');
 });
 
-app.get('/', (req, res) => res.send('Proxy OK'));
-
-const server = app.listen(process.env.PORT || 3000, () => console.log('Proxy corriendo en puerto', process.env.PORT || 3000));
-server.keepAliveTimeout = 120000;
-server.headersTimeout = 120000;
+server.listen(process.env.PORT || 3000, () => {
+  console.log('Proxy corriendo en puerto', process.env.PORT || 3000);
+});
